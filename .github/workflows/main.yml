@@ -1,0 +1,69 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # 允许在 GitHub Actions 页面手动触发
+
+jobs:
+  build:
+    runs-on: macos-latest # 必须使用 macOS 环境
+
+    steps:
+    # 1. 检出代码
+    - uses: actions/checkout@v4
+
+    # 2. 设置 Xcode 环境
+    - name: Setup Xcode
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: 'latest' # 或指定一个稳定版本，如 '15.3'
+
+    # 3. 调整项目格式以确保兼容性（可选但推荐）
+    # 如果你的项目是用更新版本的 Xcode 创建的，这一步可能很有必要[citation:5]
+    - name: Adjust Xcode Project Format
+      run: |
+        # 将下面两行中的 'YourProjectName.xcodeproj' 替换为你的项目文件名
+        # 此命令会将新版本的项目格式降级，使其在 CI 环境中更稳定
+        sed -i '' 's/objectVersion = 77/objectVersion = 56/' YourProjectName.xcodeproj/project.pbxproj || echo "Project adjustment not needed or failed."
+
+    # 4. 使用 Xcode 构建未签名的归档文件[citation:5]
+    - name: Build Xcode Archive
+      run: |
+        # 关键参数说明：
+        # -project: 你的 .xcodeproj 文件名
+        # -scheme: 你的编译方案名称（通常在Xcode左侧面板可以找到）
+        # -configuration Release: 发布模式
+        # -archivePath: 输出归档文件的路径
+        # CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO: 禁用代码签名
+        # -destination generic/platform=iOS: 指定为通用 iOS 设备
+        xcodebuild clean archive \
+          -project "SwiftUIStarter.xcodeproj" \
+          -scheme "SwiftUIStarter" \
+          -configuration Release \
+          -archivePath "$PWD/build/YourProject.xcarchive" \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          -destination generic/platform=iOS \
+          SWIFT_OPTIMIZATION_LEVEL="-Onone" # 此参数可选，可关闭 Swift 编译优化以方便调试
+
+    # 5. 将归档文件打包成 IPA[citation:5]
+    - name: Package IPA from Archive
+      run: |
+        # 从 .xcarchive 中提取出 .app 应用程序包
+        APP_PATH="$PWD/build/YourProject.xcarchive/Products/Applications/YourAppName.app"
+        # 创建标准的 IPA 目录结构：一个名为 Payload 的文件夹，内含 .app 文件
+        IPA_DIR="$PWD/build/ipa"
+        mkdir -p "$IPA_DIR/Payload"
+        cp -R "$APP_PATH" "$IPA_DIR/Payload/"
+        # 压缩 Payload 文件夹并重命名为 .ipa 文件
+        cd "$IPA_DIR"
+        zip -r "../YourProjectName.ipa" Payload
+
+    # 6. 上传 IPA 文件作为工作流产物[citation:5]
+    - name: Upload IPA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: unsigned-ipa
+        path: ${{ github.workspace }}/build/YourProjectName.ipa
+        retention-days: 7 # 产物保留天数，可按需调整
