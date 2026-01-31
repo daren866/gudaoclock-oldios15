@@ -1,9 +1,9 @@
-name: Build Unsigned IPA
+name: Build Unsigned IPA with Tuist
 
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # 允许在 GitHub Actions 页面手动触发
+  workflow_dispatch: # 允许手动触发
 
 jobs:
   build:
@@ -13,57 +13,76 @@ jobs:
     # 1. 检出代码
     - uses: actions/checkout@v4
 
-    # 2. 设置 Xcode 环境
+    # 2. 设置 Xcode 环境 (为 xcodebuild 准备)
     - name: Setup Xcode
       uses: maxim-lobanov/setup-xcode@v1
       with:
-        xcode-version: 'latest' # 或指定一个稳定版本，如 '15.3'
+        xcode-version: 'latest' # Tuist 通常需要较新的 Xcode
 
-    # 3. 调整项目格式以确保兼容性（可选但推荐）
-    # 如果你的项目是用更新版本的 Xcode 创建的，这一步可能很有必要[citation:5]
-    - name: Adjust Xcode Project Format
+    # 3. 安装 Tuist CLI
+    - name: Install Tuist
       run: |
-        # 将下面两行中的 'YourProjectName.xcodeproj' 替换为你的项目文件名
-        # 此命令会将新版本的项目格式降级，使其在 CI 环境中更稳定
-        sed -i '' 's/objectVersion = 77/objectVersion = 56/' YourProjectName.xcodeproj/project.pbxproj || echo "Project adjustment not needed or failed."
+        curl -Ls https://install.tuist.io | bash
+        # 将 Tuist 添加到当前会话的 PATH 中
+        TUIST_PATH="$HOME/.local/share/tuist/env/bin"
+        echo "$TUIST_PATH" >> $GITHUB_PATH
 
-    # 4. 使用 Xcode 构建未签名的归档文件[citation:5]
+    # 4. 生成 Xcode 项目文件 (.xcodeproj)
+    - name: Generate Project with Tuist
+      run: |
+        # 在项目根目录执行生成命令
+        # 这会根据 Project.swift / Workspace.swift 生成 .xcodeproj
+        tuist generate --no-open
+        # 列出生成的文件，用于调试
+        ls -la *.xcodeproj || echo "No .xcodeproj found in root"
+
+    # 5. 使用 xcodebuild 构建未签名的归档文件
     - name: Build Xcode Archive
       run: |
-        # 关键参数说明：
-        # -project: 你的 .xcodeproj 文件名
-        # -scheme: 你的编译方案名称（通常在Xcode左侧面板可以找到）
-        # -configuration Release: 发布模式
-        # -archivePath: 输出归档文件的路径
-        # CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO: 禁用代码签名
-        # -destination generic/platform=iOS: 指定为通用 iOS 设备
+        # 关键：先查找 Tuist 刚生成的 .xcodeproj 文件
+        # 假设 Tuist 在根目录生成单个 .xcodeproj，且名称与 target 匹配
+        PROJECT_FILE=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1)
+        if [ -z "$PROJECT_FILE" ]; then
+          echo "错误：未找到 .xcodeproj 文件"
+          exit 1
+        fi
+        PROJECT_NAME=$(basename "$PROJECT_FILE" .xcodeproj)
+        echo "找到项目文件: $PROJECT_NAME"
+        
+        # 获取 Scheme 名称（通常与项目名相同或可推断）
+        SCHEME_NAME="$PROJECT_NAME" # 常见情况，可根据需要调整
+        
         xcodebuild clean archive \
-          -project "SwiftUIStarter.xcodeproj" \
-          -scheme "SwiftUIStarter" \
+          -project "$PROJECT_NAME.xcodeproj" \
+          -scheme "$SCHEME_NAME" \
           -configuration Release \
-          -archivePath "$PWD/build/YourProject.xcarchive" \
+          -archivePath "$PWD/build/$PROJECT_NAME.xcarchive" \
           CODE_SIGN_IDENTITY="" \
           CODE_SIGNING_REQUIRED=NO \
-          -destination generic/platform=iOS \
-          SWIFT_OPTIMIZATION_LEVEL="-Onone" # 此参数可选，可关闭 Swift 编译优化以方便调试
+          -destination generic/platform=iOS
 
-    # 5. 将归档文件打包成 IPA[citation:5]
+    # 6. 将归档文件打包成 IPA
     - name: Package IPA from Archive
       run: |
-        # 从 .xcarchive 中提取出 .app 应用程序包
-        APP_PATH="$PWD/build/YourProject.xcarchive/Products/Applications/YourAppName.app"
-        # 创建标准的 IPA 目录结构：一个名为 Payload 的文件夹，内含 .app 文件
+        # 动态获取项目名和 scheme 名，确保与上一步匹配
+        PROJECT_FILE=$(find . -maxdepth 1 -name "*.xcodeproj" | head -1)
+        PROJECT_NAME=$(basename "$PROJECT_FILE" .xcodeproj)
+        SCHEME_NAME="$PROJECT_NAME"
+        
+        # Tuist 生成的应用路径模式
+        APP_PATH="$PWD/build/$PROJECT_NAME.xcarchive/Products/Applications/$SCHEME_NAME.app"
         IPA_DIR="$PWD/build/ipa"
+        
+        # 创建 IPA 结构并打包
         mkdir -p "$IPA_DIR/Payload"
         cp -R "$APP_PATH" "$IPA_DIR/Payload/"
-        # 压缩 Payload 文件夹并重命名为 .ipa 文件
         cd "$IPA_DIR"
-        zip -r "../YourProjectName.ipa" Payload
+        zip -r "../$PROJECT_NAME.ipa" Payload
 
-    # 6. 上传 IPA 文件作为工作流产物[citation:5]
+    # 7. 上传 IPA 文件作为工作流产物
     - name: Upload IPA Artifact
       uses: actions/upload-artifact@v4
       with:
         name: unsigned-ipa
-        path: ${{ github.workspace }}/build/YourProjectName.ipa
-        retention-days: 7 # 产物保留天数，可按需调整
+        path: ${{ github.workspace }}/build/*.ipa # 匹配生成的任何 .ipa 文件
+        retention-days: 7
